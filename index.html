@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<!-- Playables SDK -->
+<script>// Playables SDK v1.0.0
+// Game lifecycle bridge: rAF-based game-ready detection + event communication
+(function() {
+  'use strict';
+
+  // Idempotency: skip if already initialized (e.g., server-side injection
+  // followed by client-side inject-javascript via the Bloks webview component).
+  if (window.playablesSDK) return;
+
+  var HANDLER_NAME = 'playablesGameEventHandler';
+  var ANDROID_BRIDGE_NAME = '_MetaPlayablesBridge';
+  var RAF_FRAME_THRESHOLD = 3;
+
+  var gameReadySent = false;
+  var firstInteractionSent = false;
+  var errorSent = false;
+  var frameCount = 0;
+  var originalRAF = window.requestAnimationFrame;
+
+  // --- Transport Layer ---
+
+  function hasIOSBridge() {
+    return !!(window.webkit &&
+              window.webkit.messageHandlers &&
+              window.webkit.messageHandlers[HANDLER_NAME]);
+  }
+
+  function hasAndroidBridge() {
+    return !!(window[ANDROID_BRIDGE_NAME] &&
+              typeof window[ANDROID_BRIDGE_NAME].postEvent === 'function');
+  }
+
+  function isInIframe() {
+    return !!(window.parent && window.parent !== window);
+  }
+
+  function sendEvent(eventName, payload) {
+    var message = {
+      type: eventName,
+      payload: payload || {},
+      timestamp: Date.now()
+    };
+
+    if (hasIOSBridge()) {
+      try {
+        window.webkit.messageHandlers[HANDLER_NAME].postMessage(message);
+      } catch (e) { /* ignore */ }
+      return;
+    }
+
+    if (hasAndroidBridge()) {
+    try {
+      var p = payload || {};
+      p.__secureToken = window.__fbAndroidBridgeAuthToken || '';
+      window[ANDROID_BRIDGE_NAME].postEvent(
+        eventName,
+        JSON.stringify(p)
+      );
+    } catch (e) { /* ignore */ }
+    return;
+  }
+
+    if (isInIframe()) {
+      try {
+        window.parent.postMessage(message, '*');
+      } catch (e) { /* ignore */ }
+      return;
+    }
+  }
+
+  // --- rAF Game-Ready Detection ---
+
+  function onFrame() {
+    if (gameReadySent) return;
+
+    frameCount++;
+    if (frameCount >= RAF_FRAME_THRESHOLD) {
+      gameReadySent = true;
+      sendEvent('game_ready', {
+        frame_count: frameCount,
+        detected_at: Date.now()
+      });
+      return;
+    }
+
+    originalRAF.call(window, onFrame);
+  }
+
+  if (originalRAF) {
+    window.requestAnimationFrame = function(callback) {
+      if (!gameReadySent) {
+        return originalRAF.call(window, function(timestamp) {
+          frameCount++;
+          if (frameCount >= RAF_FRAME_THRESHOLD && !gameReadySent) {
+            gameReadySent = true;
+            sendEvent('game_ready', {
+              frame_count: frameCount,
+              detected_at: Date.now()
+            });
+          }
+          callback(timestamp);
+        });
+      }
+      return originalRAF.call(window, callback);
+    };
+  }
+
+  // --- First User Interaction Detection ---
+
+  function setupFirstInteractionDetection() {
+    var events = ['touchstart', 'mousedown', 'keydown'];
+
+    function onFirstInteraction() {
+      if (firstInteractionSent) return;
+      firstInteractionSent = true;
+      sendEvent('user_interaction_start', null);
+
+      for (var i = 0; i < events.length; i++) {
+        document.removeEventListener(events[i], onFirstInteraction, true);
+      }
+    }
+
+    for (var i = 0; i < events.length; i++) {
+      document.addEventListener(events[i], onFirstInteraction, true);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupFirstInteractionDetection);
+  } else {
+    setupFirstInteractionDetection();
+  }
+
+  // --- Auto Error Capture ---
+
+  window.addEventListener('error', function(event) {
+    if (errorSent) return;
+    errorSent = true;
+    sendEvent('error', {
+      message: event.message || 'Unknown error',
+      source: event.filename || '',
+      lineno: event.lineno || 0,
+      colno: event.colno || 0,
+      auto_captured: true
+    });
+  });
+
+  window.addEventListener('unhandledrejection', function(event) {
+    if (errorSent) return;
+    errorSent = true;
+    var reason = event.reason;
+    sendEvent('error', {
+      message: (reason instanceof Error) ? reason.message : String(reason),
+      type: 'unhandled_promise_rejection',
+      auto_captured: true
+    });
+  });
+
+  // --- Public API ---
+
+  window.playablesSDK = {
+    complete: function(score) {
+      sendEvent('game_ended', {
+        score: score,
+        completed: true
+      });
+    },
+
+    error: function(message) {
+      if (errorSent) return;
+      errorSent = true;
+      sendEvent('error', {
+        message: message || 'Unknown error',
+        auto_captured: false
+      });
+    },
+
+    sendEvent: function(eventName, payload) {
+      if (!eventName || typeof eventName !== 'string') return;
+      sendEvent(eventName, payload);
+    }
+  };
+
+  // Kick off rAF detection in case no game code calls rAF immediately
+  if (originalRAF) {
+    originalRAF.call(window, onFrame);
+  }
+})();</script>
+<script>window.Intl=window.Intl||{};Intl.t=function(s){return(Intl._locale&&Intl._locale[s])||s;};</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Encrypt/Decrypt — one key, many names</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  .glass { backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+  .ring-soft { box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset; }
+</style>
+</head>
+<body class="min-h-screen bg-[#050709] text-slate-100 relative overflow-x-hidden">
+  <!-- bg -->
+  <div class="pointer-events-none fixed inset-0">
+    <div class="absolute -top-40 -right-40 h-96 w-96 rounded-full bg-violet-600/20 blur-3xl"></div>
+    <div class="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-cyan-500/15 blur-3xl"></div>
+  </div>
+
+  <header class="relative z-10 border-b border-white/5 bg-black/20 glass">
+    <div class="mx-auto max-w-6xl px-6 py-6 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="h-9 w-9 rounded-xl bg-violet-600/20 ring-soft flex items-center justify-center">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" class="text-violet-400"><path d="M12 3l7 4v5c0 5-3.5 7.5-7 9-3.5-1.5-7-4-7-9V7l7-4z" stroke="currentColor" stroke-width="1.5"/></svg>
+        </div>
+        <div>
+          <h1 class="text-xl font-semibold tracking-tight">Encrypt/Decrypt — one key, many names</h1>
+          <p class="text-xs text-slate-400 -mt-0.5">Single resident passkey · PRF-derived keys per secret name</p>
+        </div>
+      </div>
+      <div class="hidden md:flex items-center gap-2 text-[11px] text-slate-400">
+        <span class="px-2 py-1 rounded-lg bg-white/5 ring-soft">WebAuthn PRF</span>
+        <span class="px-2 py-1 rounded-lg bg-white/5 ring-soft">AES-GCM</span>
+        <span class="px-2 py-1 rounded-lg bg-white/5 ring-soft">No storage</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="relative z-10 mx-auto max-w-6xl px-6 py-8">
+    <!-- Secret name -->
+    <div class="mb-6 rounded-2xl bg-white/[0.03] border border-white/10 p-4 sm:p-5 glass">
+      <div class="flex flex-col sm:flex-row sm:items-end gap-4">
+        <div class="flex-1">
+          <label for="secretName" class="text-sm font-medium text-slate-200">Secret name</label>
+          <div class="mt-1.5 relative">
+            <input id="secretName" value="secret" class="w-full rounded-xl bg-black/40 border border-white/10 px-3.5 py-2.5 text-[15px] outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" placeholder="e.g., email, bank, notes"/>
+            <div class="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-300">salt = SHA-256("v1:"+name)</div>
+          </div>
+          <p class="mt-2 text-xs text-slate-400">One physical key credential is reused. Different names = different encryption keys via WebAuthn PRF.</p>
+        </div>
+        <div class="flex gap-2">
+          <button id="tryKey" class="px-3.5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm transition">Test key</button>
+          <button id="clearAll" class="px-3.5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm transition">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- Encrypt -->
+      <section class="rounded-2xl bg-white/[0.03] border border-white/10 glass ring-soft">
+        <div class="p-5 border-b border-white/5">
+          <h2 class="font-medium flex items-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" class="text-cyan-400"><path d="M8 11V8a4 4 0 118 0v3" stroke="currentColor" stroke-width="1.5"/><rect x="5" y="11" width="14" height="9" rx="2" stroke="currentColor" stroke-width="1.5"/></svg>
+            Encrypt
+          </h2>
+          <p class="text-xs text-slate-400 mt-1">Touch your security key to derive a key for this name.</p>
+        </div>
+        <div class="p-5 space-y-4">
+          <div>
+            <label class="text-xs text-slate-400">Plaintext</label>
+            <textarea id="plain" rows="5" class="mt-1.5 w-full rounded-xl bg-black/40 border border-white/10 px-3.5 py-2.5 outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 resize-y" placeholder="Type secret to encrypt..."></textarea>
+          </div>
+          <button id="encBtn" class="w-full group relative overflow-hidden rounded-xl bg-violet-600 hover:bg-violet-500 active:bg-violet-600 transition px-4 py-2.5 font-medium">
+            <span class="relative z-10 flex items-center justify-center gap-2">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+              Encrypt with security key
+            </span>
+            <div class="absolute inset-0 opacity-0 group-hover:opacity-100 transition bg-gradient-to-r from-violet-600 to-cyan-500 blur-xl"></div>
+          </button>
+
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-slate-400">Encrypted payload</label>
+              <button id="copyEnc" class="text-[11px] px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10">Copy</button>
+            </div>
+            <textarea id="encOut" rows="4" readonly class="mt-1.5 w-full rounded-xl bg-black/60 border border-white/10 px-3.5 py-2.5 mono text-[12px] text-slate-200" placeholder="v3.<credId>.<iv>.<ciphertext>.<name>"></textarea>
+          </div>
+
+          <div id="qrWrap" class="hidden">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs text-slate-400">QR code</span>
+              <span class="text-[10px] text-slate-500">Scan to transfer</span>
+            </div>
+            <div class="flex justify-center p-4 rounded-xl bg-white">
+              <canvas id="qr"></canvas>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Decrypt -->
+      <section class="rounded-2xl bg-white/[0.03] border border-white/10 glass ring-soft">
+        <div class="p-5 border-b border-white/5">
+          <h2 class="font-medium flex items-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" class="text-emerald-400"><path d="M8 11V8a4 4 0 108 0v3" stroke="currentColor" stroke-width="1.5"/><rect x="5" y="11" width="14" height="9" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M12 15v2" stroke="currentColor" stroke-width="1.5"/></svg>
+            Decrypt
+          </h2>
+          <p class="text-xs text-slate-400 mt-1">Paste payload, touch the same key. Plaintext auto-clears in 60s.</p>
+        </div>
+        <div class="p-5 space-y-4">
+          <div>
+            <label class="text-xs text-slate-400">Encrypted payload</label>
+            <textarea id="cipherIn" rows="5" class="mt-1.5 w-full rounded-xl bg-black/40 border border-white/10 px-3.5 py-2.5 outline-none focus:border-emerald-500/50 focus:ring-4 focus:ring-emerald-500/10 resize-y mono text-[13px]" placeholder="v3...."></textarea>
+          </div>
+          <button id="decBtn" class="w-full relative overflow-hidden rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-600 transition px-4 py-2.5 font-medium">
+            <span class="relative z-10 flex items-center justify-center gap-2">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 17V7M7 12l5-5 5 5" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
+              Decrypt with security key
+            </span>
+          </button>
+
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-slate-400">Plaintext</label>
+              <span id="clearCountdown" class="text-[11px] text-amber-300/80 hidden"></span>
+            </div>
+            <textarea id="plainOut" rows="4" readonly class="mt-1.5 w-full rounded-xl bg-black/60 border border-white/10 px-3.5 py-2.5" placeholder="Decrypted text appears here..."></textarea>
+          </div>
+
+          <div class="rounded-xl bg-amber-500/5 border border-amber-500/20 p-3 text-[12px] text-amber-200/80">
+            <strong class="text-amber-200">Physical key only:</strong> cross-platform authenticator (USB/NFC/BLE), resident credential, user verification required. No passwords, no cloud.
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Explainer -->
+    <div class="mt-8 rounded-2xl border border-white/5 bg-white/[0.02] p-5 text-[13px] leading-relaxed text-slate-300">
+      <p><span class="text-slate-100 font-medium">How it works (Option 3):</span> We create exactly <em>one</em> resident credential on your physical security key. For each "Secret name", we compute <span class="mono">salt = SHA-256("v1:" + name)</span> and call <span class="mono">navigator.credentials.get()</span> with <span class="mono">prf.eval.first = salt</span>. The authenticator returns a deterministic 32-byte PRF output bound to that credential + salt. We use that output directly as the AES-GCM-256 key. No keys are stored in the browser—only the encrypted payload.</p>
+    </div>
+  </main>
+
+  <div id="toast" class="fixed bottom-6 right-6 z-50 hidden px-4 py-2.5 rounded-xl bg-slate-800 text-white text-sm shadow-2xl border border-white/10"></div>
+
+<script>
+// ===== Utilities =====
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function toast(msg, isErr=false){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  t.style.background = isErr ? 'rgb(153 27 27)' : 'rgb(30 41 59)';
+  t.style.borderColor = isErr ? 'rgba(248,113,113,.3)' : 'rgba(255,255,255,.1)';
+  setTimeout(()=>{ t.classList.add('opacity-0'); }, 2200);
+  setTimeout(()=>{ t.classList.add('hidden'); t.classList.remove('opacity-0'); }, 2700);
+}
+
+function buf2b64u(buf){
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function b64u2buf(s){
+  s = s.replace(/-/g,'+').replace(/_/g,'/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i);
+  return out.buffer;
+}
+const rand = n => crypto.getRandomValues(new Uint8Array(n));
+
+// ===== Single resident credential logic =====
+let cachedCredId = null; // base64url string, in-memory only
+
+async function ensureResidentCredential(){
+  // Option 3: try to find existing resident credential on the physical key.
+  // If not found, create exactly ONE.
+  if (cachedCredId) return cachedCredId;
+
+  if (!window.PublicKeyCredential) throw new Error('WebAuthn not supported');
+
+  const challenge = rand(32);
+  try {
+    // Discoverable get (no allowCredentials) — will find the resident credential if present
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        userVerification: 'required',
+        hints: ['security-key'],
+        // no allowCredentials => discoverable
+      }
+    });
+    cachedCredId = assertion.id; // base64url
+    return cachedCredId;
+  } catch (e) {
+    // Assume not found → create
+    const createChallenge = rand(32);
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: createChallenge,
+        rp: { name: 'Local Vault' },
+        user: {
+          id: new Uint8Array(16).fill(1), // fixed per spec requirement
+          name: 'master',
+          displayName: 'Physical Key'
+        },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7 },   // ES256
+          { type: 'public-key', alg: -257 }  // RS256
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'cross-platform',
+          residentKey: 'required',
+          requireResidentKey: true,
+          userVerification: 'required'
+        },
+        hints: ['security-key'],
+        extensions: {
+          prf: { enabled: true },
+          hmacCreateSecret: true
+        },
+        attestation: 'none',
+        timeout: 60000
+      }
+    });
+    cachedCredId = cred.id;
+    toast('Security key credential created');
+    return cachedCredId;
+  }
+}
+
+// ===== PRF key derivation per secret name =====
+async function getPrfKey(secretName, allowCreds){
+  // Compute salt = SHA-256("v1:" + secretName) — first 32 bytes (full hash)
+  const salt = await crypto.subtle.digest('SHA-256', enc.encode('v1:' + secretName));
+
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: rand(32),
+      allowCredentials: allowCreds, // [] for discoverable encrypt, [id] for decrypt
+      userVerification: 'required',
+      hints: ['security-key'],
+      extensions: {
+        prf: { eval: { first: new Uint8Array(salt) } }
+      },
+      timeout: 60000
+    }
+  });
+
+  const ext = assertion.getClientExtensionResults();
+  const prf = ext.prf?.results?.first;
+  if (!prf) throw new Error('PRF not available on this key');
+  // prf is ArrayBuffer 32 bytes
+  return { prfSecret: prf, assertion };
+}
+
+// ===== Encrypt =====
+async function doEncrypt(){
+  try {
+    const secretName = $('secretName').value.trim() || 'secret';
+    const plaintext = $('plain').value;
+    if (!plaintext) return toast('Enter text to encrypt', true);
+
+    $('encBtn').disabled = true;
+    $('encBtn').innerHTML = '<span class="opacity-80">Touch your key…</span>';
+
+    await ensureResidentCredential();
+
+    // Use discoverable credential (empty allowCredentials) — will use the single resident key
+    const { prfSecret, assertion } = await getPrfKey(secretName, []);
+
+    const key = await crypto.subtle.importKey('raw', prfSecret, { name: 'AES-GCM' }, false, ['encrypt']);
+    const iv = rand(12);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+
+    const payload = [
+      'v3',
+      buf2b64u(assertion.rawId),
+      buf2b64u(iv),
+      buf2b64u(ct),
+      buf2b64u(enc.encode(secretName))
+    ].join('.');
+
+    $('encOut').value = payload;
+
+    // QR
+    const qr = new QRious({ element: $('qr'), value: payload, size: 220, level: 'M', background: 'white', foreground: 'black' });
+    $('qrWrap').classList.remove('hidden');
+
+    toast('Encrypted');
+  } catch (e) {
+    console.error(e);
+    toast(e.message || 'Encryption failed', true);
+  } finally {
+    $('encBtn').disabled = false;
+    $('encBtn').innerHTML = '<span class="relative z-10 flex items-center justify-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>Encrypt with security key</span>';
+  }
+}
+
+// ===== Decrypt =====
+let clearTimer = null;
+let countdownTimer = null;
+
+async function doDecrypt(){
+  try {
+    const payload = $('cipherIn').value.trim();
+    if (!payload) return toast('Paste a payload', true);
+
+    const parts = payload.split('.');
+    if (parts.length !== 5 || parts[0] !== 'v3') throw new Error('Invalid payload format');
+
+    const credId = b64u2buf(parts[1]);
+    const iv = new Uint8Array(b64u2buf(parts[2]));
+    const ct = b64u2buf(parts[3]);
+    const secretName = dec.decode(b64u2buf(parts[4]));
+
+    $('secretName').value = secretName; // reflect name used
+
+    $('decBtn').disabled = true;
+    $('decBtn').innerHTML = '<span class="opacity-80">Touch your key…</span>';
+
+    const { prfSecret } = await getPrfKey(secretName, [
+      { id: credId, type: 'public-key', transports: ['usb','nfc','ble'] }
+    ]);
+
+    const key = await crypto.subtle.importKey('raw', prfSecret, { name: 'AES-GCM' }, false, ['decrypt']);
+    const ptBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    const plaintext = dec.decode(ptBuf);
+
+    $('plainOut').value = plaintext;
+    toast('Decrypted');
+
+    // Auto-clear in 60s
+    clearTimeout(clearTimer);
+    clearInterval(countdownTimer);
+    let remain = 60;
+    $('clearCountdown').classList.remove('hidden');
+    $('clearCountdown').textContent = `clears in ${remain}s`;
+    countdownTimer = setInterval(()=>{
+      remain--;
+      $('clearCountdown').textContent = `clears in ${remain}s`;
+      if (remain<=0) clearInterval(countdownTimer);
+    }, 1000);
+    clearTimer = setTimeout(()=>{
+      $('plainOut').value = '';
+      $('clearCountdown').classList.add('hidden');
+      toast('Cleared');
+    }, 60000);
+
+  } catch (e) {
+    console.error(e);
+    toast(e.message || 'Decryption failed', true);
+  } finally {
+    $('decBtn').disabled = false;
+    $('decBtn').innerHTML = '<span class="relative z-10 flex items-center justify-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 17V7M7 12l5-5 5 5" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>Decrypt with security key</span>';
+  }
+}
+
+// ===== Wire up =====
+$('encBtn').addEventListener('click', doEncrypt);
+$('decBtn').addEventListener('click', doDecrypt);
+$('copyEnc').addEventListener('click', async ()=>{
+  const v = $('encOut').value;
+  if (!v) return;
+  try { await navigator.clipboard.writeText(v); toast('Copied'); }
+  catch { $('encOut').select(); document.execCommand('copy'); toast('Copied'); }
+});
+$('clearAll').addEventListener('click', ()=>{
+  $('plain').value = '';
+  $('encOut').value = '';
+  $('cipherIn').value = '';
+  $('plainOut').value = '';
+  $('qrWrap').classList.add('hidden');
+  clearTimeout(clearTimer); clearInterval(countdownTimer);
+  $('clearCountdown').classList.add('hidden');
+});
+$('tryKey').addEventListener('click', async ()=>{
+  try { await ensureResidentCredential(); toast('Key ready'); }
+  catch(e){ toast(e.message, true); }
+});
+
+// Warn if not secure context
+if (!window.isSecureContext) {
+  toast('Requires HTTPS or localhost', true);
+}
+</script>
+</body>
+</html>
