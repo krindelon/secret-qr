@@ -1,2 +1,10 @@
-# secret-qr
-Single-file HTML encryptor. Password-protect notes with 600k PBKDF2 iterations, share via QR. Works offline.
+# secure-qr
+
+Encrypt and decrypt text offline in your browser.
+
+Encryption:
+- Password → NFKC normalize → PBKDF2-HMAC-SHA256 (salt=16 random bytes, iterations=600000) → 256-bit AES-GCM key
+- Plaintext → AES-GCM encrypt (IV=12 random bytes) → ciphertext || 128-bit tag
+- Output: `v2.<base64(salt)>.<iterations>.<base64(iv)>.<base64(ct+tag)>`
+
+Decryption parses the v2 payload, re-derives the key with the stored salt and iterations, and decrypts with AES-GCM using the stored IV. All via Web Crypto SubtleCrypto, client-side only.
