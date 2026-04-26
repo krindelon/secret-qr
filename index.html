@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<!-- Playables SDK -->
+<script>// Playables SDK v1.0.0
+// Game lifecycle bridge: rAF-based game-ready detection + event communication
+(function() {
+  'use strict';
+
+  // Idempotency: skip if already initialized (e.g., server-side injection
+  // followed by client-side inject-javascript via the Bloks webview component).
+  if (window.playablesSDK) return;
+
+  var HANDLER_NAME = 'playablesGameEventHandler';
+  var ANDROID_BRIDGE_NAME = '_MetaPlayablesBridge';
+  var RAF_FRAME_THRESHOLD = 3;
+
+  var gameReadySent = false;
+  var firstInteractionSent = false;
+  var errorSent = false;
+  var frameCount = 0;
+  var originalRAF = window.requestAnimationFrame;
+
+  // --- Transport Layer ---
+
+  function hasIOSBridge() {
+    return !!(window.webkit &&
+              window.webkit.messageHandlers &&
+              window.webkit.messageHandlers[HANDLER_NAME]);
+  }
+
+  function hasAndroidBridge() {
+    return !!(window[ANDROID_BRIDGE_NAME] &&
+              typeof window[ANDROID_BRIDGE_NAME].postEvent === 'function');
+  }
+
+  function isInIframe() {
+    return !!(window.parent && window.parent !== window);
+  }
+
+  function sendEvent(eventName, payload) {
+    var message = {
+      type: eventName,
+      payload: payload || {},
+      timestamp: Date.now()
+    };
+
+    if (hasIOSBridge()) {
+      try {
+        window.webkit.messageHandlers[HANDLER_NAME].postMessage(message);
+      } catch (e) { /* ignore */ }
+      return;
+    }
+
+    if (hasAndroidBridge()) {
+    try {
+      var p = payload || {};
+      p.__secureToken = window.__fbAndroidBridgeAuthToken || '';
+      window[ANDROID_BRIDGE_NAME].postEvent(
+        eventName,
+        JSON.stringify(p)
+      );
+    } catch (e) { /* ignore */ }
+    return;
+  }
+
+    if (isInIframe()) {
+      try {
+        window.parent.postMessage(message, '*');
+      } catch (e) { /* ignore */ }
+      return;
+    }
+  }
+
+  // --- rAF Game-Ready Detection ---
+
+  function onFrame() {
+    if (gameReadySent) return;
+
+    frameCount++;
+    if (frameCount >= RAF_FRAME_THRESHOLD) {
+      gameReadySent = true;
+      sendEvent('game_ready', {
+        frame_count: frameCount,
+        detected_at: Date.now()
+      });
+      return;
+    }
+
+    originalRAF.call(window, onFrame);
+  }
+
+  if (originalRAF) {
+    window.requestAnimationFrame = function(callback) {
+      if (!gameReadySent) {
+        return originalRAF.call(window, function(timestamp) {
+          frameCount++;
+          if (frameCount >= RAF_FRAME_THRESHOLD && !gameReadySent) {
+            gameReadySent = true;
+            sendEvent('game_ready', {
+              frame_count: frameCount,
+              detected_at: Date.now()
+            });
+          }
+          callback(timestamp);
+        });
+      }
+      return originalRAF.call(window, callback);
+    };
+  }
+
+  // --- First User Interaction Detection ---
+
+  function setupFirstInteractionDetection() {
+    var events = ['touchstart', 'mousedown', 'keydown'];
+
+    function onFirstInteraction() {
+      if (firstInteractionSent) return;
+      firstInteractionSent = true;
+      sendEvent('user_interaction_start', null);
+
+      for (var i = 0; i < events.length; i++) {
+        document.removeEventListener(events[i], onFirstInteraction, true);
+      }
+    }
+
+    for (var i = 0; i < events.length; i++) {
+      document.addEventListener(events[i], onFirstInteraction, true);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupFirstInteractionDetection);
+  } else {
+    setupFirstInteractionDetection();
+  }
+
+  // --- Auto Error Capture ---
+
+  window.addEventListener('error', function(event) {
+    if (errorSent) return;
+    errorSent = true;
+    sendEvent('error', {
+      message: event.message || 'Unknown error',
+      source: event.filename || '',
+      lineno: event.lineno || 0,
+      colno: event.colno || 0,
+      auto_captured: true
+    });
+  });
+
+  window.addEventListener('unhandledrejection', function(event) {
+    if (errorSent) return;
+    errorSent = true;
+    var reason = event.reason;
+    sendEvent('error', {
+      message: (reason instanceof Error) ? reason.message : String(reason),
+      type: 'unhandled_promise_rejection',
+      auto_captured: true
+    });
+  });
+
+  // --- Public API ---
+
+  window.playablesSDK = {
+    complete: function(score) {
+      sendEvent('game_ended', {
+        score: score,
+        completed: true
+      });
+    },
+
+    error: function(message) {
+      if (errorSent) return;
+      errorSent = true;
+      sendEvent('error', {
+        message: message || 'Unknown error',
+        auto_captured: false
+      });
+    },
+
+    sendEvent: function(eventName, payload) {
+      if (!eventName || typeof eventName !== 'string') return;
+      sendEvent(eventName, payload);
+    }
+  };
+
+  // Kick off rAF detection in case no game code calls rAF immediately
+  if (originalRAF) {
+    originalRAF.call(window, onFrame);
+  }
+})();</script>
+<script>window.Intl=window.Intl||{};Intl.t=function(s){return(Intl._locale&&Intl._locale[s])||s;};</script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local Vault — Physical Key Encryption</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    * { -webkit-tap-highlight-color: transparent; }
+  </style>
+</head>
+<body class="min-h-full bg-[#fafafa] dark:bg-[#0a0a0a] text-zinc-900 dark:text-zinc-100 antialiased selection:bg-violet-500/30">
+  <div class="max-w-xl mx-auto px-4 py-8 md:py-12">
+    <!-- Header -->
+    <header class="flex items-center justify-between mb-8">
+      <div class="flex items-center gap-3">
+        <div class="size-9 rounded-2xl bg-zinc-900 dark:bg-white text-white dark:text-black grid place-items-center shadow-lg shadow-zinc-900/10">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 11c0 3.015-2.686 5-6 5s-6-1.985-6-5V7c0-3.015 2.686-5 6-5s6 1.985 6 5v4Z" transform="translate(6 2)"/>
+            <path d="M12 15v4c0 1.657-2.686 3-6 3s-6-1.343-6-3v-4" transform="translate(6 2)"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-[22px] font-semibold tracking-tight leading-none">Local Vault</h1>
+          <p class="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">Physical key • PRF • AES-GCM</p>
+        </div>
+      </div>
+      <div class="text-[11px] px-2.5 py-1 rounded-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium">v2</div>
+    </header>
+
+    <!-- Main Card -->
+    <div class="bg-white dark:bg-zinc-900 rounded-[28px] shadow-[0_1px_0_0_rgba(0,0,0,0.02),0_20px_40px_-20px_rgba(0,0,0,0.3)] ring-1 ring-zinc-900/5 dark:ring-white/10 overflow-hidden">
+      <!-- Secret Name -->
+      <div class="p-5 md:p-6 border-b border-zinc-100 dark:border-zinc-800">
+        <label for="secretName" class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">Secret Name</label>
+        <div class="relative">
+          <input id="secretName" value="secret" autocomplete="off" spellcheck="false"
+            class="w-full h-12 px-4 pr-10 rounded-2xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500 transition text-[15px]">
+          <svg class="absolute right-3.5 top-1/2 -translate-y-1/2 size-4 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3"/><path d="m8 12 8 0"/></svg>
+        </div>
+        <p class="mt-2 text-[12px] text-zinc-500">Used to derive the resident credential. Same name = same key.</p>
+      </div>
+
+      <!-- Tabs -->
+      <div class="p-1.5">
+        <div class="grid grid-cols-2 gap-1.5 p-1 bg-zinc-100 dark:bg-zinc-950 rounded-2xl">
+          <button id="tab-enc" class="h-10 rounded-xl text-sm font-medium bg-white dark:bg-zinc-800 shadow-sm ring-1 ring-zinc-900/5 transition">Encrypt</button>
+          <button id="tab-dec" class="h-10 rounded-xl text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white transition">Decrypt</button>
+        </div>
+      </div>
+
+      <!-- Encrypt Panel -->
+      <div id="panel-enc" class="p-5 md:p-6 pt-2 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">Plaintext</label>
+          <textarea id="encInput" rows="4" placeholder="Type what you want to protect..."
+            class="w-full px-4 py-3 rounded-2xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500 transition resize-none text-[15px]"></textarea>
+        </div>
+        <button id="encBtn" class="group relative w-full h-12 rounded-2xl bg-zinc-900 dark:bg-white text-white dark:text-black font-medium text-[15px] overflow-hidden transition active:scale-[0.99] disabled:opacity-50">
+          <span class="relative z-10 flex items-center justify-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="group-disabled:animate-pulse"><path d="M12 11c0 3.015-2.686 5-6 5s-6-1.985-6-5V7c0-3.015 2.686-5 6-5s6 1.985 6 5v4Z" transform="translate(6 2)"/><path d="M12 15v4c0 1.657-2.686 3-6 3s-6-1.343-6-3v-4" transform="translate(6 2)"/></svg>
+            Encrypt with Security Key
+          </span>
+          <div class="absolute inset-0 opacity-0 group-hover:opacity-100 transition bg-gradient-to-r from-violet-600 to-indigo-600"></div>
+        </button>
+
+        <div id="encResult" class="hidden space-y-4 pt-2">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Encrypted Payload</label>
+              <button id="copyPayload" class="text-xs font-medium text-violet-600 dark:text-violet-400 hover:underline">Copy</button>
+            </div>
+            <div class="relative">
+              <input id="payloadOut" readonly class="w-full h-11 px-3 pr-10 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 mono text-[12px] truncate">
+              <svg class="absolute right-3 top-1/2 -translate-y-1/2 size-3.5 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </div>
+          </div>
+          <div class="flex justify-center">
+            <div class="p-3 bg-white rounded-2xl ring-1 ring-zinc-200 shadow-sm">
+              <canvas id="qr" width="200" height="200" class="block"></canvas>
+            </div>
+          </div>
+          <p class="text-center text-[11px] text-zinc-500">v2 • credential-bound • share QR or text</p>
+        </div>
+      </div>
+
+      <!-- Decrypt Panel -->
+      <div id="panel-dec" class="hidden p-5 md:p-6 pt-2 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">Encrypted Payload</label>
+          <textarea id="decInput" rows="4" placeholder="Paste v2.payload..."
+            class="w-full px-4 py-3 rounded-2xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500 transition resize-none mono text-[13px]"></textarea>
+        </div>
+        <button id="decBtn" class="group relative w-full h-12 rounded-2xl bg-zinc-900 dark:bg-white text-white dark:text-black font-medium text-[15px] overflow-hidden transition active:scale-[0.99] disabled:opacity-50">
+          <span class="relative z-10 flex items-center justify-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 13c-3.314 0-6-1.985-6-5V4c0-3.015 2.686-5 6-5s6 1.985 6 5v4c0 3.015-2.686 5-6 5Z" transform="translate(0 7)"/><path d="M6 11v4c0 1.657 2.686 3 6 3s6-1.343 6-3v-4" transform="translate(0 7)"/></svg>
+            Decrypt with Security Key
+          </span>
+          <div class="absolute inset-0 opacity-0 group-hover:opacity-100 transition bg-gradient-to-r from-emerald-600 to-teal-600"></div>
+        </button>
+
+        <div id="decResult" class="hidden space-y-3 pt-2">
+          <label class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Decrypted Plaintext</label>
+          <div class="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900">
+            <p id="plainOut" class="text-[15px] whitespace-pre-wrap break-words"></p>
+          </div>
+        </div>
+      </div>
+
+      <div class="px-6 pb-5 pt-1">
+        <p class="text-[11px] text-center text-zinc-500 dark:text-zinc-500">No data stored. Everything runs in memory. PRF secret never leaves your key.</p>
+      </div>
+    </div>
+
+    <p class="mt-6 text-center text-xs text-zinc-500">Requires a FIDO2 security key with hmac-secret / PRF support (YubiKey 5+, etc.)</p>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+<script>
+// ===== LOCAL VAULT - WebAuthn PRF Encryption =====
+// No localStorage, sessionStorage, or cookies. All in-memory only.
+// 
+// ENCRYPT FLOW:
+// 1. Derive PRF salt from secret name (SHA-256)
+// 2. Try navigator.credentials.get() with no allowCredentials (discoverable)
+//    - Uses { hints:['security-key'], userVerification:'required', extensions:{prf:{eval:{first:salt}}} }
+// 3. If get fails: create new resident credential (cross-platform, residentKey required)
+//    - rp:{name:'Local Vault'}, user.id = SHA-256(name)[:16]
+//    - extensions:{prf:{enabled:true}, hmacCreateSecret:true}
+// 4. Immediately get() again with allowCredentials to obtain PRF output
+// 5. Use PRF output (32 bytes) as AES-GCM-256 key to encrypt
+// 6. Output: v2.<credId>.<iv>.<ciphertext>.<encodedName>
+//
+// DECRYPT FLOW:
+// 1. Parse payload, extract credId, iv, ct, name
+// 2. Derive same PRF salt from name
+// 3. get() with allowCredentials:[{id, transports:['usb','nfc','ble']}]
+// 4. Decrypt with PRF-derived AES-GCM key
+
+(() => {
+  const $ = id => document.getElementById(id);
+  const secretNameEl = $('secretName');
+  const tabEnc = $('tab-enc'), tabDec = $('tab-dec');
+  const panelEnc = $('panel-enc'), panelDec = $('panel-dec');
+  const encInput = $('encInput'), encBtn = $('encBtn'), encResult = $('encResult');
+  const payloadOut = $('payloadOut'), copyPayload = $('copyPayload');
+  const decInput = $('decInput'), decBtn = $('decBtn'), decResult = $('decResult'), plainOut = $('plainOut');
+  const toastWrap = $('toast');
+  let qrInstance = null;
+
+  // Dark mode
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.classList.add('dark');
+
+  // Tabs
+  function setTab(which) {
+    const isEnc = which === 'enc';
+    tabEnc.classList.toggle('bg-white', isEnc);
+    tabEnc.classList.toggle('dark:bg-zinc-800', isEnc);
+    tabEnc.classList.toggle('shadow-sm', isEnc);
+    tabEnc.classList.toggle('ring-1', isEnc);
+    tabEnc.classList.toggle('ring-zinc-900/5', isEnc);
+    tabEnc.classList.toggle('text-zinc-500', !isEnc);
+    tabDec.classList.toggle('bg-white', !isEnc);
+    tabDec.classList.toggle('dark:bg-zinc-800', !isEnc);
+    tabDec.classList.toggle('shadow-sm', !isEnc);
+    tabDec.classList.toggle('ring-1', !isEnc);
+    tabDec.classList.toggle('ring-zinc-900/5', !isEnc);
+    tabDec.classList.toggle('text-zinc-500', isEnc);
+    panelEnc.classList.toggle('hidden', !isEnc);
+    panelDec.classList.toggle('hidden', isEnc);
+  }
+  tabEnc.onclick = () => setTab('enc');
+  tabDec.onclick = () => setTab('dec');
+
+  // Toast
+  function toast(msg, type='base') {
+    const el = document.createElement('div');
+    el.className = 'pointer-events-auto px-3.5 py-2.5 rounded-2xl shadow-lg backdrop-blur-xl text-[13px] font-medium transition-all ' + 
+      (type==='error' ? 'bg-red-600 text-white' : 'bg-zinc-900/90 dark:bg-zinc-100/90 text-white dark:text-zinc-900');
+    el.textContent = msg;
+    toastWrap.appendChild(el);
+    setTimeout(() => { el.style.opacity='0'; el.style.transform='translateY(8px)'; }, 2400);
+    setTimeout(() => el.remove(), 3000);
+  }
+
+  // Utils
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const rand = n => crypto.getRandomValues(new Uint8Array(n));
+  const bufToB64u = buf => {
+    const b = new Uint8Array(buf); let s=''; for(let i=0;i<b.length;i++) s+=String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  };
+  const b64uToBuf = s => {
+    s = s.replace(/-/g,'+').replace(/_/g,'/'); const pad=s.length%4; if(pad) s+='='.repeat(4-pad);
+    const bin = atob(s); const out = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out.buffer;
+  };
+  const sha256 = async data => await crypto.subtle.digest('SHA-256', typeof data==='string'?enc.encode(data):data);
+  const deriveSalt = async name => await sha256('LocalVault-v2|prf|'+name); // 32 bytes, deterministic per name
+
+  // WebAuthn wrappers with graceful hints fallback
+  async function webauthnGet(opts) {
+    try { return await navigator.credentials.get({publicKey: opts}); }
+    catch(e) { if (e instanceof TypeError && opts.hints) { const o={...opts}; delete o.hints; return navigator.credentials.get({publicKey:o}); } throw e; }
+  }
+  async function webauthnCreate(opts) {
+    try { return await navigator.credentials.create({publicKey: opts}); }
+    catch(e) { if (e instanceof TypeError && opts.hints) { const o={...opts}; delete o.hints; return navigator.credentials.create({publicKey:o}); } throw e; }
+  }
+
+  // Core: get PRF from key (create if needed)
+  async function getPrfForEncrypt(secretName) {
+    const salt = await deriveSalt(secretName);
+    const challenge = rand(32);
+    // 1. Try existing resident credential (discoverable)
+    try {
+      const cred = await webauthnGet({
+        challenge,
+        userVerification: 'required',
+        hints: ['security-key'],
+        extensions: { prf: { eval: { first: salt } } }
+      });
+      const prf = cred.getClientExtensionResults()?.prf?.results?.first;
+      if (!prf) throw new Error('PRF not supported by authenticator');
+      return { cred, prf };
+    } catch (err) {
+      // 2. Not found or no PRF — create new resident credential
+      if (err.name !== 'NotAllowedError' && err.name !== 'NotFoundError' && err.name !== 'InvalidStateError' && !err.message.includes('PRF')) {
+        // user cancelled or other error - rethrow to avoid creating unwanted creds
+        if (err.name === 'NotAllowedError') throw err;
+      }
+      toast('Creating new credential on key…');
+      const userIdFull = await sha256(secretName);
+      const userId = new Uint8Array(userIdFull).slice(0,16);
+      
+      const newCred = await webauthnCreate({
+        challenge: rand(32),
+        rp: { name: 'Local Vault' },
+        user: { id: userId, name: secretName, displayName: secretName },
+        pubKeyCredParams: [{type:'public-key', alg:-7}, {type:'public-key', alg:-257}],
+        authenticatorSelection: {
+          authenticatorAttachment: 'cross-platform',
+          residentKey: 'required',
+          requireResidentKey: true,
+          userVerification: 'required'
+        },
+        hints: ['security-key'],
+        extensions: { prf: { enabled: true }, hmacCreateSecret: true },
+        timeout: 60000,
+        attestation: 'none'
+      });
+
+      // 3. Immediately get PRF with the new credential
+      const cred = await webauthnGet({
+        challenge: rand(32),
+        allowCredentials: [{ id: newCred.rawId, type: 'public-key', transports: ['usb','nfc','ble'] }],
+        userVerification: 'required',
+        hints: ['security-key'],
+        extensions: { prf: { eval: { first: salt } } }
+      });
+      const prf = cred.getClientExtensionResults()?.prf?.results?.first;
+      if (!prf) throw new Error('PRF unavailable after creation');
+      return { cred, prf };
+    }
+  }
+
+  async function encryptWithKey() {
+    const name = (secretNameEl.value || 'secret').trim();
+    const plaintext = encInput.value;
+    if (!plaintext) return toast('Enter text to encrypt', 'error');
+    if (!window.PublicKeyCredential) return toast('WebAuthn not supported', 'error');
+
+    encBtn.disabled = true; const old = encBtn.innerHTML; encBtn.querySelector('span').innerHTML = `<svg class="animate-spin size-4" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" stroke-width="4" fill="none"/><path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" stroke-width="4" fill="none"/></svg> Waiting for key…`;
+
+    try {
+      const { cred, prf } = await getPrfForEncrypt(name);
+      // AES-GCM encrypt using PRF as key
+      const key = await crypto.subtle.importKey('raw', prf, 'AES-GCM', false, ['encrypt']);
+      const iv = rand(12);
+      const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(plaintext));
+      
+      const payload = `v2.${bufToB64u(cred.rawId)}.${bufToB64u(iv)}.${bufToB64u(ct)}.${encodeURIComponent(name)}`;
+      payloadOut.value = payload;
+      encResult.classList.remove('hidden');
+      
+      // QR
+      if (!qrInstance) qrInstance = new QRious({ element: $('qr'), size: 200, level: 'M', padding: 0 });
+      qrInstance.set({ foreground: '#000000', background: '#ffffff', value: payload });
+      
+      toast('Encrypted');
+    } catch (e) {
+      console.error(e);
+      toast(e.name === 'NotAllowedError' ? 'Key cancelled' : (e.message || 'Encryption failed'), 'error');
+    } finally {
+      encBtn.disabled = false; encBtn.innerHTML = old;
+    }
+  }
+
+  async function decryptWithKey() {
+    const payload = decInput.value.trim();
+    if (!payload.startsWith('v2.')) return toast('Invalid payload', 'error');
+    const parts = payload.split('.');
+    if (parts.length < 5) return toast('Malformed payload', 'error');
+    
+    try {
+      const credId = b64uToBuf(parts[1]);
+      const iv = new Uint8Array(b64uToBuf(parts[2]));
+      const ct = b64uToBuf(parts[3]);
+      const name = decodeURIComponent(parts.slice(4).join('.'));
+      secretNameEl.value = name; // reflect name from payload
+      
+      const salt = await deriveSalt(name);
+      decBtn.disabled = true; const old = decBtn.innerHTML; decBtn.querySelector('span').innerHTML = `<svg class="animate-spin size-4" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.2" stroke-width="4" fill="none"/><path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" stroke-width="4" fill="none"/></svg> Waiting for key…`;
+
+      const cred = await webauthnGet({
+        challenge: rand(32),
+        allowCredentials: [{ id: credId, type: 'public-key', transports: ['usb','nfc','ble'] }],
+        userVerification: 'required',
+        hints: ['security-key'],
+        extensions: { prf: { eval: { first: salt } } }
+      });
+      const prf = cred.getClientExtensionResults()?.prf?.results?.first;
+      if (!prf) throw new Error('PRF not available');
+      
+      const key = await crypto.subtle.importKey('raw', prf, 'AES-GCM', false, ['decrypt']);
+      const ptBuf = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, ct);
+      plainOut.textContent = dec.decode(ptBuf);
+      decResult.classList.remove('hidden');
+      toast('Decrypted');
+    } catch (e) {
+      console.error(e);
+      toast(e.name === 'NotAllowedError' ? 'Key cancelled' : 'Decryption failed', 'error');
+    } finally {
+      decBtn.disabled = false; decBtn.innerHTML = old;
+    }
+  }
+
+  encBtn.onclick = encryptWithKey;
+  decBtn.onclick = decryptWithKey;
+  copyPayload.onclick = async () => {
+    await navigator.clipboard.writeText(payloadOut.value);
+    toast('Copied');
+  };
+
+  // Enter key shortcuts
+  encInput.addEventListener('keydown', e => { if ((e.metaKey||e.ctrlKey) && e.key==='Enter') encryptWithKey(); });
+  decInput.addEventListener('keydown', e => { if ((e.metaKey||e.ctrlKey) && e.key==='Enter') decryptWithKey(); });
+})();
+</script>
+</body>
+</html>
