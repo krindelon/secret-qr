@@ -899,30 +899,36 @@
   const textDec = new TextDecoder();
   const rand    = n => crypto.getRandomValues(new Uint8Array(n));
 
-  // WebAuthn user ID — stored in localStorage solely for WebAuthn protocol compliance
-  function getOrCreateUserId() {
-    const KEY = 'webauthn_user_id';
-    try {
-      const stored = localStorage.getItem(KEY);
-      if (stored) return Uint8Array.from(JSON.parse(stored));
-    } catch { /* unavailable */ }
-    const id = crypto.getRandomValues(new Uint8Array(16));
-    try { localStorage.setItem(KEY, JSON.stringify(Array.from(id))); } catch {}
-    return id;
-  }
+  // Fixed user handle — WebAuthn requires a user.id but we have no server and
+  // no accounts, so this value is meaningless. A stable constant avoids the
+  // risk of localStorage clearing causing a second credential slot to be
+  // created on hardware keys.
+  const WEBAUTHN_USER_ID = new Uint8Array([0]);
 
-  const WEBAUTHN_CREATE_OPTIONS = {
-    rp:      { id: location.hostname, name: 'Local Vault' },
-    user:    { id: getOrCreateUserId(), name: 'owner', displayName: 'Local Vault' },
-    pubKeyCredParams: [
-      { type: 'public-key', alg: -7 }
-    ],
-    authenticatorSelection: {
-      residentKey:      'required',
-      userVerification: 'required'
-    },
-    extensions: { prf: { enabled: true } }
-  };
+  // Build create options fresh each call so authenticatorAttachment is
+  // intentionally absent — this tells
+  // the browser to offer ALL authenticators (platform AND cross-platform),
+  // which is required for Google Password Manager to appear on Android.
+  function buildCreateOptions() {
+    return {
+      rp:   { id: location.hostname, name: 'Local Vault' },
+      user: { id: WEBAUTHN_USER_ID, name: 'owner', displayName: 'Local Vault' },
+      // Include both ES256 and RS256 for broadest authenticator compatibility
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7  },  // ES256
+        { type: 'public-key', alg: -257 }   // RS256
+      ],
+      authenticatorSelection: {
+        residentKey:      'required',
+        userVerification: 'required'
+        // authenticatorAttachment intentionally omitted:
+        //   'platform'       → only phone/laptop built-in (Google PM, Face ID)
+        //   'cross-platform' → only hardware keys / other devices
+        //   omitted          → browser offers everything, user chooses
+      },
+      extensions: { prf: { enabled: true } }
+    };
+  }
 
   // ── 3. Mode toggle ────────────────────────────────────────────────────────
 
@@ -1077,19 +1083,38 @@
 
   async function createResidentCredential() {
     return navigator.credentials.create({
-      publicKey: { challenge: rand(32), ...WEBAUTHN_CREATE_OPTIONS }
+      publicKey: { challenge: rand(32), ...buildCreateOptions() }
     });
   }
 
+  // Cached PRF salt — derived once, reused every call
+  let _prfSalt = null;
+  async function getPrfSalt() {
+    if (!_prfSalt) {
+      _prfSalt = await crypto.subtle.digest('SHA-256', textEnc.encode('static-key'));
+    }
+    return _prfSalt;
+  }
+
+  /**
+   * Ask an authenticator for its PRF output.
+   * @param {Array|undefined} allowCreds  Pass a non-empty array to target a specific
+   *   credential, or omit/pass undefined/[] to show the full authenticator picker
+   *   (required for Google Password Manager to appear on Android Chrome).
+   */
   async function getPrfKey(allowCreds) {
-    const salt = await crypto.subtle.digest('SHA-256', textEnc.encode('static-key'));
+    const salt = await getPrfSalt();
     const publicKey = {
       challenge:        rand(32),
       rpId:             location.hostname,
       userVerification: 'required',
       extensions:       { prf: { eval: { first: salt } } }
     };
-    if (allowCreds && allowCreds.length) publicKey.allowCredentials = allowCreds;
+    // Only set allowCredentials when we have a concrete list — passing an empty
+    // array suppresses the platform authenticator picker on some browsers.
+    if (allowCreds && allowCreds.length > 0) {
+      publicKey.allowCredentials = allowCreds;
+    }
     const assertion   = await navigator.credentials.get({ publicKey });
     const ext         = assertion.getClientExtensionResults();
     const keyMaterial = ext?.prf?.results?.first;
@@ -1130,13 +1155,28 @@
     let key, param, credId;
 
     if (currentMode === 'key') {
-      // Passkey: derive key from PRF output
+      // Passkey: derive key from PRF output.
+      // Strategy:
+      //   1. Show the full authenticator picker (no allowCredentials hint) so the
+      //      user can pick any stored passkey, including Google Password Manager.
+      //   2. If the get() returns NotAllowedError with a message suggesting no
+      //      credential exists (or if it succeeds but PRF is absent), create one.
+      //   3. Never swallow a user-cancel — re-throw so the UI can report it.
       let keyMaterial, assertion;
       try {
-        ({ keyMaterial, assertion } = await getPrfKey([]));
-      } catch {
+        ({ keyMaterial, assertion } = await getPrfKey());
+      } catch (e) {
+        // Re-throw user cancellations immediately — do NOT create a new passkey.
+        const name = e?.name ?? '';
+        const msg  = (e?.message ?? '').toLowerCase();
+        const userCancelled =
+          name === 'NotAllowedError' &&
+          (msg.includes('cancel') || msg.includes('abort') || msg.includes('user'));
+        if (userCancelled) throw e;
+
+        // Any other failure (no credential found, first use) → register a new one.
         await createResidentCredential();
-        ({ keyMaterial, assertion } = await getPrfKey([]));
+        ({ keyMaterial, assertion } = await getPrfKey());
       }
       key    = await crypto.subtle.importKey('raw', keyMaterial, 'AES-GCM', false, ['encrypt']);
       credId = assertion.rawId;
@@ -1168,14 +1208,17 @@
     let key;
 
     if (currentMode === 'key') {
-      // paramBuf is the credential ID
+      // paramBuf is the credential ID stored at encrypt time.
+      // Try targeting that specific credential first (faster, no picker needed).
+      // If that fails (e.g. synced passkey has a different local ID), fall back
+      // to the open picker — again with no allowCredentials so Google PM appears.
       const credId = paramBuf;
       let keyMaterial;
       try {
         ({ keyMaterial } = await getPrfKey([{ type: 'public-key', id: credId }]));
       } catch {
-        // Fallback to discoverable (handles synced passkeys with different ID)
-        ({ keyMaterial } = await getPrfKey([]));
+        // Fallback: open picker — handles synced passkeys with a different local ID
+        ({ keyMaterial } = await getPrfKey());
       }
       key = await crypto.subtle.importKey('raw', keyMaterial, 'AES-GCM', false, ['decrypt']);
     } else {
