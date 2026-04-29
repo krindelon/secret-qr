@@ -758,7 +758,7 @@
 
   </div><!-- /.card -->
 
-  <footer>AES-GCM-256 · WebAuthn PRF or PBKDF2-SHA256 (600k) · Runs locally</footer>
+  <footer>AES-GCM-256 · WebAuthn PRF+HKDF-SHA-256 or PBKDF2-SHA256 (600k) · Runs locally</footer>
 
 </div><!-- /.wrap -->
 
@@ -791,6 +791,13 @@
     5. UI helpers
     6. Crypto utilities
     7. WebAuthn helpers (passkey mode)
+       - PRF salt derivation
+       - Error classification
+       - Passkey creation
+       - PRF key-material retrieval
+       - HKDF key derivation from PRF
+       - getOrCreatePasskeyKey (encrypt flow)
+       - getPasskeyKeyForDecrypt (decrypt flow)
     8. PBKDF2 helpers (password mode)
     9. Shared AES-GCM encrypt / decrypt
    10. QR rendering (with title/footer)
@@ -897,33 +904,40 @@
   const textDec = new TextDecoder();
   const rand    = n => crypto.getRandomValues(new Uint8Array(n));
 
-  // Fixed user handle — WebAuthn requires a user.id but we have no server and
-  // no accounts, so this value is meaningless. A stable constant avoids the
-  // risk of localStorage clearing causing a second credential slot to be
-  // created on hardware keys.
-  const WEBAUTHN_USER_ID = new Uint8Array([0]);
-
-  // Build create options fresh each call so authenticatorAttachment is
-  // intentionally absent — this tells
-  // the browser to offer ALL authenticators (platform AND cross-platform),
-  // which is required for Google Password Manager to appear on Android.
-  function buildCreateOptions() {
+  // Stable, human-readable user handle. WebAuthn requires a user.id, but since
+  // this app has no server or accounts, a fixed value is used so repeated
+  // registrations don't create extra credential slots.
+  // Build credential-creation options. authenticatorAttachment is intentionally
+  // omitted so the browser offers ALL authenticators: platform (Face ID, Windows
+  // Hello, Google Password Manager) and cross-platform (hardware keys) alike.
+  async function buildCreateOptions() {
+    // A fresh random user.id on every registration ensures each passkey gets its
+    // own authenticator slot and never overwrites an existing credential.
+    // Overwriting would silently change the PRF output, making all previously
+    // encrypted payloads permanently unreadable.
+    const userId = crypto.getRandomValues(new Uint8Array(16));
+    // Pass the PRF salt at create() time so the authenticator activates the PRF
+    // extension for this credential immediately. The browser will report whether
+    // PRF is supported via getClientExtensionResults().prf.enabled, letting us
+    // warn the user before they try to encrypt anything.
+    const salt = await getPrfSalt();
     return {
       rp:   { id: location.hostname, name: 'Local Vault' },
-      user: { id: WEBAUTHN_USER_ID, name: 'owner', displayName: 'Local Vault' },
-      // Include both ES256 and RS256 for broadest authenticator compatibility
+      user: {
+        id:          userId,
+        name:        'krindelon.github.io/secret-qr',
+        displayName: 'local_user'
+      },
       pubKeyCredParams: [
-        { type: 'public-key', alg: -7  },  // ES256
-        { type: 'public-key', alg: -257 }   // RS256
+        { type: 'public-key', alg: -7   },  // ES256
+        { type: 'public-key', alg: -257  }   // RS256
       ],
       authenticatorSelection: {
-        residentKey:             'required',
-        userVerification:        'required',
-        authenticatorAttachment: 'cross-platform'  // prefer physical hardware keys
-        // Note: Chrome Android may still show Bitwarden and other OS-level
-        // credential providers despite this — enforcement is best-effort.
+        residentKey:      'required',
+        userVerification: 'required'
+        // No authenticatorAttachment — allow platform AND cross-platform
       },
-      extensions: { prf: { enabled: true } }
+      extensions: { prf: { eval: { first: salt } } }
     };
   }
 
@@ -1078,46 +1092,212 @@
 
   // ── 7. WebAuthn helpers (passkey mode) ───────────────────────────────────
 
-  async function createResidentCredential() {
-    return navigator.credentials.create({
-      publicKey: { challenge: rand(32), ...buildCreateOptions() }
-    });
-  }
-
-  // Cached PRF salt — derived once, reused every call
+  // Fixed PRF evaluation salt — same value every call so the same passkey
+  // always produces the same raw key material.
   let _prfSalt = null;
   async function getPrfSalt() {
     if (!_prfSalt) {
-      _prfSalt = await crypto.subtle.digest('SHA-256', textEnc.encode('static-key'));
+      _prfSalt = await crypto.subtle.digest('SHA-256', textEnc.encode('encrypt-decrypt-v1'));
     }
     return _prfSalt;
   }
 
   /**
-   * Ask an authenticator for its PRF output.
-   * @param {Array|undefined} allowCreds  Pass a non-empty array to target a specific
-   *   credential, or omit/pass undefined/[] to show the full authenticator picker
-   *   (required for Google Password Manager to appear on Android Chrome).
+   * Classify a WebAuthn error into one of four categories.
+   * @param {Error} e
+   * @returns {'cancelled'|'no-credential'|'prf-unsupported'|'unknown'}
    */
-  async function getPrfKey(allowCreds) {
+  function classifyWebAuthnError(e) {
+    const name = e?.name ?? '';
+    const msg  = (e?.message ?? '').toLowerCase();
+
+    if (name === 'NotAllowedError') {
+      // Browser signals a user dismissal with cancel/abort/user in the message.
+      if (msg.includes('cancel') || msg.includes('abort') || msg.includes('user')) {
+        return 'cancelled';
+      }
+      // Otherwise NotAllowedError usually means no matching credential was found.
+      return 'no-credential';
+    }
+    if (name === 'InvalidStateError') return 'no-credential';
+    return 'unknown';
+  }
+
+  /**
+   * Register a new passkey.
+   * Passes the PRF salt at create() time so the authenticator activates PRF
+   * for this credential. Checks the result and throws if PRF is unsupported,
+   * so the user finds out immediately rather than at first encrypt attempt.
+   * Throws on user cancel, PRF unsupported, or other errors.
+   */
+  async function createPasskey() {
+    let credential;
+    try {
+      credential = await navigator.credentials.create({
+        publicKey: { challenge: rand(32), ...await buildCreateOptions() }
+      });
+    } catch (e) {
+      const kind = classifyWebAuthnError(e);
+      if (kind === 'cancelled') throw new Error('Passkey creation was cancelled');
+      throw new Error('Could not create passkey — ' + (e?.message || 'unknown error'));
+    }
+
+    // Verify the authenticator activated the PRF extension. Some authenticators
+    // support WebAuthn but not PRF — better to catch this now than at encrypt time.
+    const prfEnabled = credential.getClientExtensionResults()?.prf?.enabled;
+    if (!prfEnabled) {
+      throw new Error(
+        'This authenticator does not support encryption (PRF extension). ' +
+        'Try a different passkey provider, such as your platform authenticator.'
+      );
+    }
+
+    return credential;
+  }
+
+  /**
+   * Ask an authenticator for its PRF output and return the raw key material.
+   *
+   * @param {Array|undefined} allowCreds  Non-empty array to target a specific
+   *   credential ID, or omit to show the full picker (needed so platform
+   *   authenticators like Google Password Manager appear on Android Chrome).
+   * @returns {{ keyMaterial: ArrayBuffer, credentialId: ArrayBuffer }}
+   */
+  async function getPrfKeyMaterial(allowCreds) {
     const salt = await getPrfSalt();
     const publicKey = {
-      challenge:               rand(32),
-      rpId:                    location.hostname,
-      userVerification:        'required',
-      authenticatorAttachment: 'cross-platform',
-      extensions:              { prf: { eval: { first: salt } } }
+      challenge:        rand(32),
+      rpId:             location.hostname,
+      userVerification: 'required',
+      // No authenticatorAttachment — allow platform AND cross-platform
+      extensions:       { prf: { eval: { first: salt } } }
     };
-    // Only set allowCredentials when we have a concrete list — passing an empty
-    // array suppresses the platform authenticator picker on some browsers.
+    // Only set allowCredentials when we have a concrete list — an empty array
+    // suppresses the platform authenticator picker on some browsers.
     if (allowCreds && allowCreds.length > 0) {
       publicKey.allowCredentials = allowCreds;
     }
-    const assertion   = await navigator.credentials.get({ publicKey });
-    const ext         = assertion.getClientExtensionResults();
-    const keyMaterial = ext?.prf?.results?.first;
-    if (!keyMaterial) throw new Error('PRF not supported on this key');
-    return { keyMaterial, assertion };
+
+    const assertion = await navigator.credentials.get({ publicKey });
+    const ext       = assertion.getClientExtensionResults();
+    const raw       = ext?.prf?.results?.first;
+
+    if (!raw) {
+      throw new Error(
+        'This passkey does not support encryption (PRF extension). ' +
+        'Try a different passkey or authenticator.'
+      );
+    }
+    return { keyMaterial: raw, credentialId: assertion.rawId };
+  }
+
+  /**
+   * Derive an AES-GCM-256 key from PRF output using HKDF-SHA-256.
+   * The PRF output is already high-entropy key material; HKDF provides
+   * domain separation and clean key extraction.
+   *
+   * @param {ArrayBuffer} keyMaterial  Raw PRF output from the authenticator
+   * @param {'encrypt'|'decrypt'} usage
+   * @returns {Promise<CryptoKey>}
+   */
+  async function deriveKeyFromPrf(keyMaterial, usage) {
+    const baseKey = await crypto.subtle.importKey(
+      'raw', keyMaterial, 'HKDF', false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        // Salt is optional for HKDF when input is already high-entropy key material.
+        salt: new Uint8Array(32),
+        info: textEnc.encode('encrypt-decrypt-aes-gcm-v1')
+      },
+      baseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      [usage]
+    );
+  }
+
+  /**
+   * For ENCRYPT: try to get an existing passkey first. If none is found,
+   * offer to create one, then get PRF from it.
+   *
+   * @returns {{ key: CryptoKey, credentialId: ArrayBuffer }}
+   */
+  // Sentinel error thrown after passkey creation so the encrypt flow can show
+  // a friendly "created" message and let the user press Encrypt again.
+  class PasskeyCreatedError extends Error {
+    constructor() { super('PasskeyCreated'); this.name = 'PasskeyCreatedError'; }
+  }
+
+  async function getOrCreatePasskeyKey() {
+    if (!window.PublicKeyCredential) {
+      throw new Error('Your browser does not support passkeys');
+    }
+
+    // Step 1: try open picker — user picks any stored passkey
+    let keyMaterial, credentialId;
+    try {
+      ({ keyMaterial, credentialId } = await getPrfKeyMaterial());
+      const key = await deriveKeyFromPrf(keyMaterial, 'encrypt');
+      return { key, credentialId };
+    } catch (e) {
+      const kind = classifyWebAuthnError(e);
+
+      // User deliberately dismissed the picker — stop here
+      if (kind === 'cancelled') throw new Error('Passkey prompt was cancelled');
+
+      // PRF not supported — passkey exists but can't be used for encryption
+      if (e.message?.includes('PRF')) throw e;
+
+      // No credential found or unknown — fall through to creation
+    }
+
+    // Step 2: no usable passkey found — create one, then stop.
+    // We do NOT immediately call get() again: that would show two prompts in a
+    // row. Instead we throw PasskeyCreatedError so the UI can inform the user
+    // and let them press Encrypt again to complete the flow.
+    await createPasskey();
+    throw new PasskeyCreatedError();
+  }
+
+  /**
+   * For DECRYPT: target the specific credential that was used to encrypt,
+   * falling back to an open picker (handles synced passkeys with a new local ID).
+   *
+   * @param {ArrayBuffer} credentialId  The credential ID stored in the payload
+   * @returns {CryptoKey}
+   */
+  async function getPasskeyKeyForDecrypt(credentialId) {
+    if (!window.PublicKeyCredential) {
+      throw new Error('Your browser does not support passkeys');
+    }
+
+    // Try targeting the exact credential first — avoids showing an unnecessary picker
+    try {
+      const { keyMaterial } = await getPrfKeyMaterial([
+        { type: 'public-key', id: credentialId }
+      ]);
+      return deriveKeyFromPrf(keyMaterial, 'decrypt');
+    } catch (e) {
+      const kind = classifyWebAuthnError(e);
+      // User cancelled the targeted prompt — do not open a second picker
+      if (kind === 'cancelled') throw new Error('Passkey prompt was cancelled');
+      if (e.message?.includes('PRF')) throw e;
+      // Fall through: credential may have a different local ID (e.g. synced passkey)
+    }
+
+    // Fallback: open picker so the user can pick the right key
+    try {
+      const { keyMaterial } = await getPrfKeyMaterial();
+      return deriveKeyFromPrf(keyMaterial, 'decrypt');
+    } catch (e) {
+      const kind = classifyWebAuthnError(e);
+      if (kind === 'cancelled') throw new Error('Passkey prompt was cancelled');
+      if (e.message?.includes('PRF')) throw e;
+      throw new Error('Could not access passkey — ' + (e?.message || 'unknown error'));
+    }
   }
 
   // ── 8. PBKDF2 helpers (password mode) ────────────────────────────────────
@@ -1139,65 +1319,46 @@
   // ── 9. Shared AES-GCM encrypt / decrypt ──────────────────────────────────
   //
   // Payload format (both modes):  param.iv.ciphertext  (base64url, 3 parts)
-  //   passkey:  param = credentialId  (variable length, ties decrypt to key)
+  //   passkey:  param = credentialId  (variable length, ties decrypt to the key)
   //   password: param = 16-byte salt  (used for PBKDF2 derivation)
   //
   // Key derivation is the only thing that differs between modes.
 
   /**
-   * Encrypt plaintext.
-   * @returns {{ payload: string, credId?: ArrayBuffer }} payload string + optional credId for passkey
+   * Encrypt plaintext with the current mode (passkey or password).
+   * @param {string} plaintext
+   * @returns {Promise<string>} dot-separated base64url payload
    */
   async function doEncrypt(plaintext) {
     const iv = rand(12);
-    let key, param, credId;
+    let key, param;
 
     if (currentMode === 'key') {
-      // Passkey: derive key from PRF output.
-      // Strategy:
-      //   1. Show the full authenticator picker (no allowCredentials hint) so the
-      //      user can pick any stored passkey, including Google Password Manager.
-      //   2. If the get() returns NotAllowedError with a message suggesting no
-      //      credential exists (or if it succeeds but PRF is absent), create one.
-      //   3. Never swallow a user-cancel — re-throw so the UI can report it.
-      let keyMaterial, assertion;
-      try {
-        ({ keyMaterial, assertion } = await getPrfKey());
-      } catch (e) {
-        // Re-throw user cancellations immediately — do NOT create a new passkey.
-        const name = e?.name ?? '';
-        const msg  = (e?.message ?? '').toLowerCase();
-        const userCancelled =
-          name === 'NotAllowedError' &&
-          (msg.includes('cancel') || msg.includes('abort') || msg.includes('user'));
-        if (userCancelled) throw e;
-
-        // Any other failure (no credential found, first use) → register a new one.
-        await createResidentCredential();
-        ({ keyMaterial, assertion } = await getPrfKey());
-      }
-      key    = await crypto.subtle.importKey('raw', keyMaterial, 'AES-GCM', false, ['encrypt']);
-      credId = assertion.rawId;
-      param  = credId;
+      const { key: passkeyKey, credentialId } = await getOrCreatePasskeyKey();
+      key   = passkeyKey;
+      param = credentialId;
     } else {
-      // Password: derive key from PBKDF2
       const salt = rand(16);
       key   = await deriveKeyFromPassword(encPass.value, salt);
       param = salt;
     }
 
-    const ct      = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, textEnc.encode(plaintext));
-    const payload = [buf2b64u(param), buf2b64u(iv), buf2b64u(ct)].join('.');
-    return payload;
+    const ct = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv }, key, textEnc.encode(plaintext)
+    );
+    return [buf2b64u(param), buf2b64u(iv), buf2b64u(ct)].join('.');
   }
 
   /**
-   * Decrypt a payload string.
-   * @returns {string} decrypted plaintext
+   * Decrypt a payload string with the current mode.
+   * @param {string} payload  dot-separated base64url string
+   * @returns {Promise<string>} decrypted plaintext
    */
   async function doDecrypt(payload) {
     const parts = payload.trim().split('.');
-    if (parts.length !== 3) throw new Error('Invalid payload — expected 3 dot-separated parts');
+    if (parts.length !== 3) {
+      throw new Error('Invalid payload — expected 3 dot-separated parts');
+    }
 
     const B64U = /^[A-Za-z0-9_-]+$/;
     if (!parts.every(p => p.length > 0 && B64U.test(p))) {
@@ -1210,41 +1371,29 @@
       iv       = new Uint8Array(b64u2buf(parts[1]));
       ct       = b64u2buf(parts[2]);
     } catch {
-      throw new Error('Invalid payload — could not decode');
+      throw new Error('Invalid payload — could not decode base64');
     }
 
     let key;
 
     if (currentMode === 'key') {
-      // paramBuf is the credential ID stored at encrypt time.
-      // Try targeting that specific credential first (faster, no picker needed).
-      // If that fails (e.g. synced passkey has a different local ID), fall back
-      // to the open picker — again with no allowCredentials so Google PM appears.
-      const credId = paramBuf;
-      let keyMaterial;
-      try {
-        ({ keyMaterial } = await getPrfKey([{ type: 'public-key', id: credId }]));
-      } catch (e) {
-        // Re-throw user cancellations — do NOT open a second picker.
-        const name = e?.name ?? '';
-        const msg  = (e?.message ?? '').toLowerCase();
-        const userCancelled =
-          name === 'NotAllowedError' &&
-          (msg.includes('cancel') || msg.includes('abort') || msg.includes('user'));
-        if (userCancelled) throw e;
-        // Fallback: open picker — handles synced passkeys with a different local ID
-        ({ keyMaterial } = await getPrfKey());
-      }
-      key = await crypto.subtle.importKey('raw', keyMaterial, 'AES-GCM', false, ['decrypt']);
+      key = await getPasskeyKeyForDecrypt(paramBuf);
     } else {
-      // paramBuf is the 16-byte PBKDF2 salt
       const pass = decPass.value;
-      if (!pass) throw new Error('Enter the password');
+      if (!pass) throw new Error('Enter the password to decrypt');
       key = await deriveKeyFromPassword(pass, new Uint8Array(paramBuf));
     }
 
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
-    return textDec.decode(pt);
+    try {
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+      return textDec.decode(pt);
+    } catch {
+      throw new Error(
+        currentMode === 'key'
+          ? 'Decryption failed — wrong passkey or corrupted data'
+          : 'Decryption failed — wrong password or corrupted data'
+      );
+    }
   }
 
   // ── 10. QR rendering (with title / footer) ────────────────────────────────
@@ -1399,7 +1548,7 @@
       if (!encPass.value) return showErr(encErr, 'Enter a password');
     }
 
-    const loadingLabel = currentMode === 'key' ? 'Touch key…' : 'Deriving key…';
+    const loadingLabel = currentMode === 'key' ? 'Waiting for passkey…' : 'Deriving key…';
     setButtonLoading(btnEnc, loadingLabel);
 
     try {
@@ -1426,7 +1575,13 @@
 
     } catch (e) {
       console.error('Encryption error:', e);
-      showErr(encErr, e.message || 'Encryption failed');
+      if (e instanceof PasskeyCreatedError) {
+        // Passkey was just registered — tell the user and let them press again.
+        // Don't show an error banner; use a prominent toast instead.
+        showToast('Passkey created — press Encrypt again');
+      } else {
+        showErr(encErr, e.message || 'Encryption failed');
+      }
     } finally {
       resetButton(btnEnc);
     }
@@ -1567,7 +1722,7 @@
       return showErr(decErr, 'Enter the password');
     }
 
-    const loadingLabel = currentMode === 'key' ? 'Touch key…' : 'Decrypting…';
+    const loadingLabel = currentMode === 'key' ? 'Waiting for passkey…' : 'Decrypting…';
     setButtonLoading(btnDec, loadingLabel);
 
     try {
@@ -1584,7 +1739,7 @@
 
     } catch (e) {
       console.error('Decryption error:', e);
-      showErr(decErr, e.message || 'Decryption failed — wrong key or corrupted data');
+      showErr(decErr, e.message || 'Decryption failed');
     } finally {
       resetButton(btnDec);
     }
