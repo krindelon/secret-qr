@@ -500,6 +500,28 @@
     }
     .modal-bar span { font-size: 13px; color: var(--muted); }
 
+    /* ── No-passkey modal ────────────────────────────────────────────────────── */
+    .no-passkey-title {
+      font-size:   16px;
+      font-weight: 600;
+      margin:      0 0 8px;
+    }
+    .no-passkey-body {
+      font-size:   14px;
+      color:       var(--muted);
+      margin:      0 0 16px;
+      line-height: 1.5;
+    }
+    .no-passkey-err {
+      margin-bottom: 12px;
+    }
+    .no-passkey-actions {
+      display:   flex;
+      gap:       8px;
+      flex-wrap: wrap;
+    }
+    .no-passkey-actions .primary { flex: 1; }
+
     .spinner {
       display:          inline-block;
       width:            14px;
@@ -778,14 +800,14 @@
 </div>
 
 <!-- ── No passkey found modal ─────────────────────────────────────────────── -->
-<div id="no-passkey-modal" class="modal-backdrop hidden" aria-hidden="true">
+<div id="no-passkey-modal" class="modal-backdrop hidden" aria-hidden="true" aria-modal="true" role="dialog">
   <div class="modal">
-    <h3 style="margin:0 0 8px;font-size:16px;font-weight:600">No passkey found</h3>
-    <p style="margin:0 0 16px;color:var(--muted);font-size:14px">No passkey for this site was found. Create one to start encrypting.</p>
-    <div id="no-passkey-err" class="error hidden" style="margin-bottom:12px"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button id="no-passkey-cancel" class="ghost">Cancel</button>
+    <p class="no-passkey-title">No passkey found</p>
+    <p class="no-passkey-body">No passkey for this site was found. Create one to start encrypting — it will be stored in your password manager or security key.</p>
+    <div id="no-passkey-err" class="error hidden no-passkey-err"></div>
+    <div class="no-passkey-actions">
       <button id="no-passkey-create" class="primary">Create Passkey</button>
+      <button id="no-passkey-cancel" class="ghost">Cancel</button>
     </div>
   </div>
 </div>
@@ -1547,6 +1569,47 @@
     strengthText.textContent     = level.t + (score < 3 ? ' — use 12+ chars with mix' : '');
   });
 
+  // ── 11b. No-passkey modal ────────────────────────────────────────────────
+
+  function showNoPasskeyModal() {
+    hideErr(noPasskeyErr);
+    noPasskeyModal.classList.remove('hidden');
+    noPasskeyModal.setAttribute('aria-hidden', 'false');
+    noPasskeyCreate.focus();
+  }
+
+  function hideNoPasskeyModal() {
+    noPasskeyModal.classList.add('hidden');
+    noPasskeyModal.setAttribute('aria-hidden', 'true');
+    hideErr(noPasskeyErr);
+  }
+
+  // Close on Cancel button, backdrop click, or Escape
+  noPasskeyCancel.addEventListener('click', hideNoPasskeyModal);
+
+  noPasskeyModal.addEventListener('click', e => {
+    if (e.target === noPasskeyModal) hideNoPasskeyModal();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !noPasskeyModal.classList.contains('hidden')) hideNoPasskeyModal();
+  });
+
+  noPasskeyCreate.addEventListener('click', async () => {
+    hideErr(noPasskeyErr);
+    setButtonLoading(noPasskeyCreate, 'Creating…');
+    try {
+      await createPasskey();
+      hideNoPasskeyModal();
+      showToast('Passkey created');
+    } catch (e) {
+      console.error('Passkey creation error:', e);
+      showErr(noPasskeyErr, e.message || 'Could not create passkey');
+    } finally {
+      resetButton(noPasskeyCreate);
+    }
+  });
+
   // ── 12. Encrypt flow ──────────────────────────────────────────────────────
 
   plain.addEventListener('input', () => {
@@ -1892,40 +1955,6 @@
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && !camModal.classList.contains('hidden')) closeCam();
-    if (e.key === 'Escape' && !noPasskeyModal.classList.contains('hidden')) hideNoPasskeyModal();
-  });
-
-  // ── 15b. No-passkey modal ─────────────────────────────────────────────────
-
-  function showNoPasskeyModal() {
-    hideErr(noPasskeyErr);
-    noPasskeyModal.classList.remove('hidden');
-    noPasskeyModal.setAttribute('aria-hidden', 'false');
-  }
-
-  function hideNoPasskeyModal() {
-    noPasskeyModal.classList.add('hidden');
-    noPasskeyModal.setAttribute('aria-hidden', 'true');
-    hideErr(noPasskeyErr);
-  }
-
-  noPasskeyCancel.addEventListener('click', hideNoPasskeyModal);
-
-  noPasskeyCreate.addEventListener('click', async () => {
-    hideErr(noPasskeyErr);
-    noPasskeyCreate.disabled = true;
-    noPasskeyCreate.textContent = 'Creating…';
-    try {
-      await createPasskey();
-      hideNoPasskeyModal();
-      showToast('Passkey created');
-    } catch (e) {
-      console.error('Passkey creation error:', e);
-      showErr(noPasskeyErr, e.message || 'Could not create passkey');
-    } finally {
-      noPasskeyCreate.disabled = false;
-      noPasskeyCreate.textContent = 'Create Passkey';
-    }
   });
 
   // ── 16. Service worker ────────────────────────────────────────────────────
